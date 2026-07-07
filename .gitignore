@@ -1,0 +1,3 @@
+# Personal IP lists and generated results should not be committed
+ips.txt
+results.txt
