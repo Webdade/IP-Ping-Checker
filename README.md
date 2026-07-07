@@ -13,7 +13,8 @@ This bash script reads a list of IP addresses from a text file and checks their 
 - **Grouped output** - All reachable (OK) IPs are listed together in one block and all failed IPs in another, so each list can be copied in a single go
 - **Filtering** - Show only the healthy IPs (`ok`) or only the failed IPs (`failed`) with a single argument
 - **Copy-paste friendly** - The grouped IP lists print to `stdout` while progress and summary go to `stderr`, so `./check_ips.sh ok > alive.txt` produces a clean file of IPs only
-- **Fast execution** - Uses minimal ping packets (1 packet per IP)
+- **Reliable results** - Retries each IP a few times so random packet loss / ICMP rate-limiting doesn't wrongly mark a reachable host as failed (an IP is only `failed` when *every* attempt is lost)
+- **Fast where it counts** - A host is detected as soon as one packet replies, so only truly unreachable IPs use the retries
 - **Live progress** - Shows real-time progress with visual indicators while checking
 - **Result logging** - Saves all results to a text file
 - **Summary statistics** - Displays total, successful, and failed connections
@@ -157,12 +158,29 @@ $ ./check_ips.sh failed
 
 ## ⚙️ Configuration
 
-You can modify the following parameters in the script:
+You can modify the following variables at the top of the script:
 
-- **Ping count**: Change `-c 1` to increase the number of ping packets
-- **Timeout**: Modify `-W 2` to adjust the timeout in seconds
-- **Input file**: Change `INPUT_FILE` variable to use a different input file
-- **Output file**: Change `OUTPUT_FILE` variable to use a different output file
+- **`PING_COUNT`**: Packets sent per attempt (default `1`)
+- **`PING_TIMEOUT`**: Seconds to wait for a reply, per attempt (default `2`)
+- **`PING_RETRIES`**: Number of attempts before an IP is marked `failed` (default `4`)
+- **`INPUT_FILE`**: Use a different input file (default `ips.txt`)
+- **`OUTPUT_FILE`**: Use a different output file (default `results.txt`)
+
+### 🔁 Why retries? (Reliable results)
+
+A single ping packet is unreliable. When many hosts are checked back-to-back,
+random packet loss and **ICMP rate-limiting** cause reachable hosts to be
+reported as `failed` at random — so the *same* IP can flip between `OK` and
+`failed` on different runs.
+
+To prevent this, each IP is pinged up to `PING_RETRIES` times and is only
+marked `failed` when **every** attempt is lost. A reachable host is detected as
+soon as one packet replies, so healthy hosts stay fast while only genuinely
+unreachable hosts use all the retries.
+
+> If you have many unreachable IPs and want the scan to finish faster, lower
+> `PING_RETRIES` (e.g. `2`) and/or `PING_TIMEOUT` (e.g. `1`). For slow /
+> high-latency links, raise `PING_TIMEOUT` instead.
 
 ## 🔧 Customization Examples
 
@@ -173,10 +191,17 @@ INPUT_FILE="my_ip_list.txt"
 OUTPUT_FILE="connectivity_report.txt"
 ```
 
-### Adjusting ping parameters for slow networks:
+### Tuning reliability vs. speed:
 ```bash
-# Increase timeout to 5 seconds and send 3 packets:
-ping -c 3 -W 5 "$ip"
+# More thorough (slower) — good for flaky networks:
+PING_COUNT=2
+PING_TIMEOUT=3
+PING_RETRIES=5
+
+# Faster (less thorough) — good when most hosts are up and the network is clean:
+PING_COUNT=1
+PING_TIMEOUT=1
+PING_RETRIES=2
 ```
 
 ## 🤝 Contributing

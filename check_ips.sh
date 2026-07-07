@@ -19,6 +19,31 @@ INPUT_FILE="ips.txt"
 OUTPUT_FILE="results.txt"
 
 # ---------------------------------------------------------------------------
+# Ping settings
+# ---------------------------------------------------------------------------
+# A single ping packet is unreliable: when many hosts are checked back-to-back,
+# random packet loss and ICMP rate-limiting cause reachable hosts to be marked
+# "failed" at random (so the same IP can flip between runs). To avoid this we
+# send a few packets and retry a few times, and only mark an IP as "failed"
+# when EVERY attempt is lost.
+PING_COUNT=1        # packets sent per attempt
+PING_TIMEOUT=2      # seconds to wait for a reply, per attempt
+PING_RETRIES=4      # number of attempts before declaring an IP failed
+
+# Returns success (0) as soon as any ping attempt gets a reply, so reachable
+# hosts are detected quickly; only truly unreachable hosts use all retries.
+is_alive() {
+    local ip="$1"
+    local attempt
+    for (( attempt = 1; attempt <= PING_RETRIES; attempt++ )); do
+        if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$ip" > /dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Parse the filter argument (default: show everything)
 # ---------------------------------------------------------------------------
 FILTER="${1:-all}"
@@ -49,7 +74,7 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 
 # Clear previous results if exists
-> "$OUTPUT_FILE"
+: > "$OUTPUT_FILE"
 
 # Counter variables
 total=0
@@ -85,9 +110,9 @@ while IFS= read -r line || [ -n "$line" ]; do
         # Increment total counter
         ((total++))
 
-        # Ping the IP (1 packet, 2 second timeout)
-        # Redirect output to /dev/null to suppress ping output
-        if ping -c 1 -W 2 "$ip" > /dev/null 2>&1; then
+        # Ping the IP, retrying a few times so a single dropped packet does
+        # not wrongly mark a reachable host as failed.
+        if is_alive "$ip"; then
             # IP is reachable
             echo "$ip OK" >> "$OUTPUT_FILE"
             echo "✓ $ip - OK" >&2
