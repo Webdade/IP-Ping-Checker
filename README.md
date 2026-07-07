@@ -9,6 +9,7 @@ This bash script reads a list of IP addresses from a text file and checks their 
 ## ✨ Features
 
 - **Bulk IP checking** - Process multiple IP addresses at once
+- **Flexible input** - Accepts one IP per line **or** several IPs on one line separated by commas (`,`) — the two styles can be mixed
 - **Grouped output** - All reachable (OK) IPs are listed together in one block and all failed IPs in another, so each list can be copied in a single go
 - **Filtering** - Show only the healthy IPs (`ok`) or only the failed IPs (`failed`) with a single argument
 - **Copy-paste friendly** - The grouped IP lists print to `stdout` while progress and summary go to `stderr`, so `./check_ips.sh ok > alive.txt` produces a clean file of IPs only
@@ -85,13 +86,22 @@ google.com
 
 ## 📝 Input Format
 
-The `ips.txt` file should contain one IP address or hostname per line:
+The `ips.txt` file can list one IP address (or hostname) per line:
 ```
 192.168.1.1
 8.8.8.8
 10.0.0.1
 example.com
 ```
+
+...or you can put several IPs on the same line separated by commas (`,`).
+Both styles can even be mixed in the same file:
+```
+192.168.1.1, 8.8.8.8, 10.0.0.1
+example.com
+1.1.1.1,9.9.9.9
+```
+Extra spaces around the commas and a trailing comma are handled automatically.
 
 ## 📊 Output Format
 

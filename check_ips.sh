@@ -66,34 +66,41 @@ echo "Starting IP connectivity check..." >&2
 echo "Reading from: $INPUT_FILE" >&2
 echo "----------------------------------------" >&2
 
-# Read each IP from the file
-while IFS= read -r ip || [ -n "$ip" ]; do
-    # Remove leading/trailing whitespace
-    ip=$(echo "$ip" | xargs)
+# Read the file line by line. Each line may hold a single IP, or several IPs
+# separated by commas (and/or spaces), so both formats below are accepted:
+#     8.8.8.8
+#     1.1.1.1, 9.9.9.9, 208.67.222.222
+while IFS= read -r line || [ -n "$line" ]; do
+    # Turn commas into spaces, then split the line into individual tokens.
+    # `read -ra` splits on whitespace without triggering filename globbing.
+    line="${line//,/ }"
+    read -ra tokens <<< "$line"
 
-    # Skip empty lines
-    if [ -z "$ip" ]; then
-        continue
-    fi
+    for ip in "${tokens[@]}"; do
+        # Skip empty tokens (e.g. from a trailing comma or blank line)
+        if [ -z "$ip" ]; then
+            continue
+        fi
 
-    # Increment total counter
-    ((total++))
+        # Increment total counter
+        ((total++))
 
-    # Ping the IP (1 packet, 2 second timeout)
-    # Redirect output to /dev/null to suppress ping output
-    if ping -c 1 -W 2 "$ip" > /dev/null 2>&1; then
-        # IP is reachable
-        echo "$ip OK" >> "$OUTPUT_FILE"
-        echo "✓ $ip - OK" >&2
-        ok_ips+=("$ip")
-        ((success++))
-    else
-        # IP is not reachable
-        echo "$ip failed" >> "$OUTPUT_FILE"
-        echo "✗ $ip - failed" >&2
-        failed_ips+=("$ip")
-        ((failed++))
-    fi
+        # Ping the IP (1 packet, 2 second timeout)
+        # Redirect output to /dev/null to suppress ping output
+        if ping -c 1 -W 2 "$ip" > /dev/null 2>&1; then
+            # IP is reachable
+            echo "$ip OK" >> "$OUTPUT_FILE"
+            echo "✓ $ip - OK" >&2
+            ok_ips+=("$ip")
+            ((success++))
+        else
+            # IP is not reachable
+            echo "$ip failed" >> "$OUTPUT_FILE"
+            echo "✗ $ip - failed" >&2
+            failed_ips+=("$ip")
+            ((failed++))
+        fi
+    done
 done < "$INPUT_FILE"
 
 echo "----------------------------------------" >&2
