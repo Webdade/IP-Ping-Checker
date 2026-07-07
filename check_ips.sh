@@ -2,10 +2,14 @@
 
 # IP Ping Checker Script
 # ---------------------------------------------------------------------------
-# Reads IP addresses (or hostnames) from ips.txt and checks their connectivity
-# using ping. Results are grouped: all reachable (OK) IPs are printed together
-# in one block, and all unreachable (failed) IPs are printed together in another
-# block. Full results are also saved to results.txt.
+# Reads IP addresses (or hostnames) from ips.txt and pings them IN PARALLEL,
+# then prints the results grouped: all reachable (OK) IPs together in one
+# block, and all unreachable (failed) IPs together in another block. Nothing is
+# printed while pinging, so OK and failed are never mixed together. Full
+# results are also saved to results.txt.
+#
+# Each IP is pinged with PING_COUNT packets. It is reported OK only when at
+# least REQUIRED_OK of those packets reply; otherwise it is reported failed.
 #
 # Usage:
 #   ./check_ips.sh          Show both OK and failed IPs (grouped)
@@ -19,28 +23,22 @@ INPUT_FILE="ips.txt"
 OUTPUT_FILE="results.txt"
 
 # ---------------------------------------------------------------------------
-# Ping settings
+# Ping / performance settings  (tune these to taste)
 # ---------------------------------------------------------------------------
-# A single ping packet is unreliable: when many hosts are checked back-to-back,
-# random packet loss and ICMP rate-limiting cause reachable hosts to be marked
-# "failed" at random (so the same IP can flip between runs). To avoid this we
-# send a few packets and retry a few times, and only mark an IP as "failed"
-# when EVERY attempt is lost.
-PING_COUNT=1        # packets sent per attempt
-PING_TIMEOUT=2      # seconds to wait for a reply, per attempt
-PING_RETRIES=4      # number of attempts before declaring an IP failed
+PING_COUNT=5        # number of ping packets sent to each IP
+PING_TIMEOUT=2      # seconds to wait for each reply
+REQUIRED_OK=5       # replies needed (out of PING_COUNT) for an IP to count as OK
+MAX_PARALLEL=200    # how many IPs to ping at the same time
 
-# Returns success (0) as soon as any ping attempt gets a reply, so reachable
-# hosts are detected quickly; only truly unreachable hosts use all retries.
-is_alive() {
-    local ip="$1"
-    local attempt
-    for (( attempt = 1; attempt <= PING_RETRIES; attempt++ )); do
-        if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$ip" > /dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 1
+# Ping one IP and print "<received> <ip>", where <received> is how many of the
+# PING_COUNT packets came back. Works with both iputils and busybox ping.
+check_one() {
+    local ip="$1" out received
+    out=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$ip" 2>/dev/null)
+    received=$(printf '%s\n' "$out" \
+        | grep -oE '[0-9]+ (packets )?received' \
+        | grep -oE '^[0-9]+' | head -n1)
+    printf '%s %s\n' "${received:-0}" "$ip"
 }
 
 # ---------------------------------------------------------------------------
@@ -73,85 +71,92 @@ if [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
-# Clear previous results if exists
-: > "$OUTPUT_FILE"
-
-# Counter variables
-total=0
-success=0
-failed=0
-
-# Arrays to collect grouped results
-ok_ips=()
-failed_ips=()
-
-# Progress messages go to stderr so that stdout stays a clean, copy-paste-able
-# list of IP addresses (handy for redirecting or pasting into a chat message).
-echo "Starting IP connectivity check..." >&2
-echo "Reading from: $INPUT_FILE" >&2
-echo "----------------------------------------" >&2
-
-# Read the file line by line. Each line may hold a single IP, or several IPs
-# separated by commas (and/or spaces), so both formats below are accepted:
+# ---------------------------------------------------------------------------
+# Read every IP into the all_ips array. Each line may hold a single IP, or
+# several IPs separated by commas (and/or spaces), so both formats work:
 #     8.8.8.8
 #     1.1.1.1, 9.9.9.9, 208.67.222.222
+# ---------------------------------------------------------------------------
+all_ips=()
 while IFS= read -r line || [ -n "$line" ]; do
-    # Turn commas into spaces, then split the line into individual tokens.
-    # `read -ra` splits on whitespace without triggering filename globbing.
     line="${line//,/ }"
     read -ra tokens <<< "$line"
-
     for ip in "${tokens[@]}"; do
-        # Skip empty tokens (e.g. from a trailing comma or blank line)
-        if [ -z "$ip" ]; then
-            continue
-        fi
-
-        # Increment total counter
-        ((total++))
-
-        # Ping the IP, retrying a few times so a single dropped packet does
-        # not wrongly mark a reachable host as failed.
-        if is_alive "$ip"; then
-            # IP is reachable
-            echo "$ip OK" >> "$OUTPUT_FILE"
-            echo "✓ $ip - OK" >&2
-            ok_ips+=("$ip")
-            ((success++))
-        else
-            # IP is not reachable
-            echo "$ip failed" >> "$OUTPUT_FILE"
-            echo "✗ $ip - failed" >&2
-            failed_ips+=("$ip")
-            ((failed++))
-        fi
+        [ -n "$ip" ] && all_ips+=("$ip")
     done
 done < "$INPUT_FILE"
 
+total=${#all_ips[@]}
+if [ "$total" -eq 0 ]; then
+    echo "No IP addresses found in $INPUT_FILE" >&2
+    exit 1
+fi
+
+# Clear previous results
+: > "$OUTPUT_FILE"
+
+# Progress goes to stderr so stdout stays a clean, copy-paste-able IP list.
+echo "Starting IP connectivity check..." >&2
+echo "Reading from: $INPUT_FILE ($total IPs)" >&2
+echo "Pinging up to $MAX_PARALLEL at a time, $PING_COUNT packets each; please wait..." >&2
 echo "----------------------------------------" >&2
 
 # ---------------------------------------------------------------------------
-# Helper functions to print each grouped block.
-# The header goes to stderr and the bare IP list goes to stdout, so a command
-# like `./check_ips.sh ok > alive.txt` produces a clean file of IPs only.
+# Ping all IPs in parallel. Each check writes "<received> <ip>" to its own
+# index-named temp file so the results can be read back in the original order.
+# Nothing is printed here, so OK and failed can never appear interleaved.
+# ---------------------------------------------------------------------------
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/ip-ping.XXXXXX")
+trap 'rm -rf "$tmpdir"' EXIT
+
+idx=0
+for ip in "${all_ips[@]}"; do
+    check_one "$ip" > "$tmpdir/$(printf '%08d' "$idx")" &
+    ((idx++))
+    # Throttle: once MAX_PARALLEL pings are in flight, wait for them to finish
+    if (( idx % MAX_PARALLEL == 0 )); then
+        wait
+    fi
+done
+wait
+
+# ---------------------------------------------------------------------------
+# Collect the results (in the original order) and split into the two groups.
+# ---------------------------------------------------------------------------
+success=0
+failed=0
+ok_ips=()
+failed_ips=()
+
+for f in "$tmpdir"/*; do
+    read -r received ip < "$f"
+    received=${received:-0}
+    [ -z "$ip" ] && continue
+    if (( received >= REQUIRED_OK )); then
+        ok_ips+=("$ip")
+        ((success++))
+        echo "$ip OK ${received}/${PING_COUNT}" >> "$OUTPUT_FILE"
+    else
+        failed_ips+=("$ip")
+        ((failed++))
+        echo "$ip failed ${received}/${PING_COUNT}" >> "$OUTPUT_FILE"
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Print each grouped block. The header goes to stderr and the bare IP list to
+# stdout, so `./check_ips.sh ok > alive.txt` yields a clean file of IPs only.
 # ---------------------------------------------------------------------------
 print_ok() {
     echo "✅ OK IPs ($success):" >&2
-    for ip in "${ok_ips[@]}"; do
-        echo "$ip"
-    done
+    ((success > 0)) && printf '%s\n' "${ok_ips[@]}"
 }
 
 print_failed() {
     echo "❌ Failed IPs ($failed):" >&2
-    for ip in "${failed_ips[@]}"; do
-        echo "$ip"
-    done
+    ((failed > 0)) && printf '%s\n' "${failed_ips[@]}"
 }
 
-# ---------------------------------------------------------------------------
-# Emit the requested block(s).
-# ---------------------------------------------------------------------------
 case "$FILTER" in
     ok)
         print_ok
@@ -170,6 +175,6 @@ esac
 echo "----------------------------------------" >&2
 echo "Ping check completed!" >&2
 echo "Total IPs checked: $total" >&2
-echo "Successful: $success" >&2
+echo "Successful (>= $REQUIRED_OK/$PING_COUNT replies): $success" >&2
 echo "Failed: $failed" >&2
 echo "Results saved to: $OUTPUT_FILE" >&2

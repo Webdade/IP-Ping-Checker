@@ -9,14 +9,14 @@ This bash script reads a list of IP addresses from a text file and checks their 
 ## ✨ Features
 
 - **Bulk IP checking** - Process multiple IP addresses at once
+- **Parallel & fast** - Pings up to `MAX_PARALLEL` IPs (200 by default) at the same time instead of one-by-one, so hundreds of IPs finish in seconds
 - **Flexible input** - Accepts one IP per line **or** several IPs on one line separated by commas (`,`) — the two styles can be mixed
 - **Grouped output** - All reachable (OK) IPs are listed together in one block and all failed IPs in another, so each list can be copied in a single go
+- **No interleaving** - Nothing is printed while pinging, so OK and failed results are never mixed together — you only see the two clean blocks at the end
 - **Filtering** - Show only the healthy IPs (`ok`) or only the failed IPs (`failed`) with a single argument
 - **Copy-paste friendly** - The grouped IP lists print to `stdout` while progress and summary go to `stderr`, so `./check_ips.sh ok > alive.txt` produces a clean file of IPs only
-- **Reliable results** - Retries each IP a few times so random packet loss / ICMP rate-limiting doesn't wrongly mark a reachable host as failed (an IP is only `failed` when *every* attempt is lost)
-- **Fast where it counts** - A host is detected as soon as one packet replies, so only truly unreachable IPs use the retries
-- **Live progress** - Shows real-time progress with visual indicators while checking
-- **Result logging** - Saves all results to a text file
+- **Reliable results** - Sends several packets per IP (5 by default) and classifies it by how many reply, so random packet loss doesn't randomly flip an IP between `OK` and `failed` on different runs
+- **Result logging** - Saves all results, including the reply count (e.g. `5/5`), to a text file
 - **Summary statistics** - Displays total, successful, and failed connections
 - **Error handling** - Validates input file existence
 - **Whitespace handling** - Automatically trims whitespace from IP addresses
@@ -76,6 +76,11 @@ google.com
 | `./check_ips.sh failed` | **Only** the unreachable (failed) IPs |
 | `./check_ips.sh --help` | Show the usage help |
 
+An IP is reported **OK** only when it replies to at least `REQUIRED_OK` of the
+`PING_COUNT` packets (by default, all **5 of 5**); otherwise it is reported
+**failed**. All IPs are pinged in parallel and the two grouped lists are shown
+once everything finishes.
+
 3. Check the full log in `results.txt`
 
 > 💡 The IP lists are printed to `stdout` and the progress/summary lines to `stderr`.
@@ -108,16 +113,14 @@ Extra spaces around the commas and a trailing comma are handled automatically.
 
 ### Console Output (`./check_ips.sh`)
 
-While checking, live progress is shown, then the results are printed in two
-grouped blocks — all OK IPs together, followed by all failed IPs together:
+Nothing is printed while pinging (so OK and failed never mix). Once every IP
+has been checked, the results are printed in two grouped blocks — all OK IPs
+together, followed by all failed IPs together:
 
 ```
 Starting IP connectivity check...
-Reading from: ips.txt
-----------------------------------------
-✓ 192.168.1.1 - OK
-✗ 10.0.0.1 - failed
-✓ 8.8.8.8 - OK
+Reading from: ips.txt (3 IPs)
+Pinging up to 200 at a time, 5 packets each; please wait...
 ----------------------------------------
 ✅ OK IPs (2):
 192.168.1.1
@@ -128,7 +131,7 @@ Reading from: ips.txt
 ----------------------------------------
 Ping check completed!
 Total IPs checked: 3
-Successful: 2
+Successful (>= 5/5 replies): 2
 Failed: 1
 Results saved to: results.txt
 ```
@@ -150,37 +153,42 @@ $ ./check_ips.sh failed
 ```
 
 ### File Output (results.txt)
+
+Each line records the IP, its verdict, and how many of the packets replied:
 ```
-192.168.1.1 OK
-10.0.0.1 failed
-8.8.8.8 OK
+192.168.1.1 OK 5/5
+8.8.8.8 OK 5/5
+10.0.0.1 failed 0/5
 ```
 
 ## ⚙️ Configuration
 
 You can modify the following variables at the top of the script:
 
-- **`PING_COUNT`**: Packets sent per attempt (default `1`)
-- **`PING_TIMEOUT`**: Seconds to wait for a reply, per attempt (default `2`)
-- **`PING_RETRIES`**: Number of attempts before an IP is marked `failed` (default `4`)
+- **`PING_COUNT`**: Number of ping packets sent to each IP (default `5`)
+- **`PING_TIMEOUT`**: Seconds to wait for each reply (default `2`)
+- **`REQUIRED_OK`**: Replies needed (out of `PING_COUNT`) for an IP to count as `OK` (default `5`, i.e. all of them)
+- **`MAX_PARALLEL`**: How many IPs to ping at the same time (default `200`)
 - **`INPUT_FILE`**: Use a different input file (default `ips.txt`)
 - **`OUTPUT_FILE`**: Use a different output file (default `results.txt`)
 
-### 🔁 Why retries? (Reliable results)
+### ⚡ How it decides OK vs. failed (and why it's reliable)
 
-A single ping packet is unreliable. When many hosts are checked back-to-back,
-random packet loss and **ICMP rate-limiting** cause reachable hosts to be
-reported as `failed` at random — so the *same* IP can flip between `OK` and
-`failed` on different runs.
+Every IP is pinged **in parallel** with `PING_COUNT` packets. It is reported
+`OK` only when at least `REQUIRED_OK` of those packets reply, and `failed`
+otherwise. With the defaults, an IP is `OK` only if it answers **all 5** packets
+and `failed` if it answers fewer.
 
-To prevent this, each IP is pinged up to `PING_RETRIES` times and is only
-marked `failed` when **every** attempt is lost. A reachable host is detected as
-soon as one packet replies, so healthy hosts stay fast while only genuinely
-unreachable hosts use all the retries.
+Sending several spaced-out packets (instead of one rapid-fire packet per host)
+avoids the random packet loss / **ICMP rate-limiting** that used to make the
+*same* IP flip between `OK` and `failed` on different runs. The exact reply
+count is saved to `results.txt` (e.g. `OK 5/5`, `failed 0/5`) so you can spot
+flaky hosts with partial loss.
 
-> If you have many unreachable IPs and want the scan to finish faster, lower
-> `PING_RETRIES` (e.g. `2`) and/or `PING_TIMEOUT` (e.g. `1`). For slow /
-> high-latency links, raise `PING_TIMEOUT` instead.
+> - Want to be more forgiving (treat a host as `OK` if it answers *most*
+>   packets)? Lower `REQUIRED_OK`, e.g. `REQUIRED_OK=3`.
+> - Scanning a very large list and want it even faster? Raise `MAX_PARALLEL`.
+> - On slow / high-latency links, raise `PING_TIMEOUT`.
 
 ## 🔧 Customization Examples
 
@@ -191,17 +199,16 @@ INPUT_FILE="my_ip_list.txt"
 OUTPUT_FILE="connectivity_report.txt"
 ```
 
-### Tuning reliability vs. speed:
+### Tuning strictness and speed:
 ```bash
-# More thorough (slower) — good for flaky networks:
-PING_COUNT=2
-PING_TIMEOUT=3
-PING_RETRIES=5
+# Stricter: require a perfect 5/5, ping fewer hosts at a time
+REQUIRED_OK=5
+MAX_PARALLEL=100
 
-# Faster (less thorough) — good when most hosts are up and the network is clean:
-PING_COUNT=1
-PING_TIMEOUT=1
-PING_RETRIES=2
+# More forgiving + faster: OK if at least 3 of 5 reply, 400 in parallel
+PING_COUNT=5
+REQUIRED_OK=3
+MAX_PARALLEL=400
 ```
 
 ## 🤝 Contributing
@@ -251,7 +258,7 @@ If you encounter any issues or have questions, please [open an issue](https://gi
 ## 📈 Roadmap
 
 - [ ] Add support for CSV output format
-- [ ] Implement parallel processing for faster execution
+- [x] Implement parallel processing for faster execution
 - [ ] Add DNS resolution for hostnames
 - [ ] Create a web interface
 - [ ] Add email notifications for failures
